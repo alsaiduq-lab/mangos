@@ -29,7 +29,7 @@ This runs mangos in CUDA mode, using the OpenAI model gpt-4o-mini.
 After installation, `update.sh` and `uninstall.sh` scripts are provided. Run the uninstall script to remove mangos:
 
 ```bash
-./uninstall.sh
+~/.local/share/mangos/uninstall.sh
 ```
 
 ## Usage
@@ -40,6 +40,7 @@ mangos will always attempt to use the last known method in the config, unless co
 
 - Multiple translation models support
 - Customizable API endpoints
+- Waybar integration
 
 ## License
 
