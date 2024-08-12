@@ -1,275 +1,357 @@
 #!/bin/bash
 
-DEBUG_LOG="/tmp/mangaocr_translate_debug.log"
-exec 3>&2
-exec 2>>"$DEBUG_LOG"
+set -euo pipefail
+
+DEBUG_LOG="/tmp/mangos_debug.log"
+VERBOSITY=1
+GUI_MODE=false
 
 INSTALL_DIR="$HOME/.local/share/mangos"
 VENV_DIR="$INSTALL_DIR/venv"
 CONFIG_FILE="$INSTALL_DIR/config.yaml"
 
-MODEL="gpt-4o-mini"
-API_BASE="http://localhost:11434"
-API_KEY=""
-DEVICE="cpu"
+declare -A CONFIG=(
+    [MODEL]="llama3.1"
+    [API_BASE]="http://localhost:11434"
+    [API_KEY]=""
+    [DEVICE]="cpu"
+    [API_TYPE]="ollama"
+)
+
 WAYBAR_MODE=false
-API_TYPE="ollama"
+SCREENSHOT_PATH=""
 
 show_help() {
-    echo "Usage: mangos [OPTIONS]"
-    echo "Translate Japanese text from screenshots using OCR and machine translation."
-    echo
-    echo "Options:"
-    echo "  -h, --help                  Show this help message and exit"
-    echo "  -m, --model MODEL           Specify the translation model to use"
-    echo "  -a, --api API_BASE          Specify the API base URL"
-    echo "  -k, --key API_KEY           Specify the API key (optional)"
-    echo "  -d, --device DEVICE         Specify the device to use (cpu or cuda)"
-    echo "  -t, --type API_TYPE         Specify the API type (ollama or openai)"
-    echo "  -v, --version               Show version information"
-    echo
-    echo "Examples:"
-    echo "  mangos                              Take a screenshot and translate"
-    echo "  mangos -m gpt-3.5-turbo -t openai   Use OpenAI API for translation"
-    echo "  mangos -a http://localhost:8080     Use a different API endpoint"
-    echo "  mangos -k myapikey                  Pass the API key"
-    echo "  mangos -d cuda                      Use CUDA (GPU) for processing"
+    cat << EOF
+Usage: mangos [OPTIONS]
+Translate Japanese text from screenshots using OCR and machine translation.
+
+Options:
+  -h, --help                  Show this help message and exit
+  -m, --model MODEL           Specify the translation model to use
+  -a, --api API_BASE          Specify the API base URL
+  -k, --key API_KEY           Specify the API key (optional)
+  -d, --device DEVICE         Specify the device to use (cpu or cuda)
+  -t, --type API_TYPE         Specify the API type (ollama, openai, or other)
+  -V, --version               Show version information
+  -q, --quiet                 Suppress all output except errors
+  -v, --verbose               Show verbose output
+
+Examples:
+  mangos                              Take a screenshot and translate
+  mangos -m gpt-3.5-turbo -t openai   Use OpenAI API for translation
+  mangos -a http://localhost:8080     Use a different API endpoint
+  mangos -k myapikey                  Pass the API key
+  mangos -d cuda                      Use CUDA (GPU) for processing
+EOF
 }
 
 show_version() {
-    echo "mangos version 0.0.1"
+    echo "mangos version 0.0.2"
 }
 
 update_config() {
-    cat > "$CONFIG_FILE" << EOL
-model: $MODEL
-api_base: $API_BASE
-api_key: $API_KEY
-device: $DEVICE
-api_type: $API_TYPE
-EOL
+    local config_content=""
+    for key in "${!CONFIG[@]}"; do
+        config_content+="${key,,}: ${CONFIG[$key]}\n"
+    done
+    echo -e "$config_content" > "$CONFIG_FILE"
 }
 
 read_config() {
-    if [ -f "$CONFIG_FILE" ]; then
-        MODEL=$(grep "model:" "$CONFIG_FILE" | awk '{print $2}')
-        API_BASE=$(grep "api_base:" "$CONFIG_FILE" | awk '{print $2}')
-        API_KEY=$(grep "api_key:" "$CONFIG_FILE" | awk '{print $2}')
-        DEVICE=$(grep "device:" "$CONFIG_FILE" | awk '{print $2}')
-        API_TYPE=$(grep "api_type:" "$CONFIG_FILE" | awk '{print $2}')
+    if [[ -f "$CONFIG_FILE" ]]; then
+        while IFS=': ' read -r key value; do
+            key=$(echo "$key" | tr '[:lower:]' '[:upper:]')
+            if [[ -n "$key" && -n "$value" ]]; then
+                CONFIG[$key]="$value"
+            fi
+        done < "$CONFIG_FILE"
     else
         update_config
     fi
 }
 
-read_config
-
-while [[ $# -gt 0 ]]; do
-    key="$1"
-    case $key in
-        -h|--help)
-            show_help
-            exit 0
-            ;;
-        -m|--model)
-            MODEL="$2"
-            echo "Model set: $MODEL" >> "$DEBUG_LOG"
-            shift 2
-            ;;
-        -a|--api)
-            API_BASE="$2"
-            echo "API Base set: $API_BASE" >> "$DEBUG_LOG"
-            shift 2
-            ;;
-        -k|--key)
-            API_KEY="$2"
-            echo "API Key set: ${API_KEY:0:5}..." >> "$DEBUG_LOG"
-            shift 2
-            ;;
-        -d|--device)
-            DEVICE="$2"
-            if [[ "$DEVICE" != "cpu" && "$DEVICE" != "cuda" ]]; then
-                echo "Error: Device must be either 'cpu' or 'cuda'" >&2
-                exit 1
-            fi
-            echo "Device set: $DEVICE" >> "$DEBUG_LOG"
-            shift 2
-            ;;
-        -t|--type)
-            API_TYPE="$2"
-            if [[ "$API_TYPE" != "ollama" && "$API_TYPE" != "openai" ]]; then
-                echo "Error: API type must be either 'ollama' or 'openai'" >&2
-                exit 1
-            fi
-            echo "API Type set: $API_TYPE" >> "$DEBUG_LOG"
-            shift 2
-            ;;
-        -w|--waybar)
-            WAYBAR_MODE=true
-            echo "Waybar mode enabled" >> "$DEBUG_LOG"
-            shift
-            ;;
-        -v|--version)
-            show_version
-            exit 0
-            ;;
-        *)
-            echo "Unknown option: $1" >&2
-            show_help
+validate_config() {
+    local required_fields=("MODEL" "API_BASE" "DEVICE" "API_TYPE")
+    for field in "${required_fields[@]}"; do
+        if [[ -z "${CONFIG[$field]}" ]]; then
+            log_error "Missing required configuration: $field"
             exit 1
-            ;;
-    esac
-done
+        fi
+    done
 
-echo "Final configuration:" >> "$DEBUG_LOG"
-echo "Model: $MODEL" >> "$DEBUG_LOG"
-echo "API Base: $API_BASE" >> "$DEBUG_LOG"
-echo "API Key: ${API_KEY:0:5}..." >> "$DEBUG_LOG"
-echo "Device: $DEVICE" >> "$DEBUG_LOG"
-echo "API Type: $API_TYPE" >> "$DEBUG_LOG"
-
-cleanup() {
-    if [ -n "$SCREENSHOT_PATH" ] && [ -f "$SCREENSHOT_PATH" ]; then
-        rm -f "$SCREENSHOT_PATH"
-        echo "Deleted screenshot: $SCREENSHOT_PATH" >> "$DEBUG_LOG"
+    if [[ "${CONFIG[API_TYPE]}" == "openai" && -z "${CONFIG[API_KEY]}" ]]; then
+        log_error "API_KEY is required for OpenAI API"
+        exit 1
     fi
 }
 
+parse_arguments() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            -m|--model)
+                CONFIG[MODEL]="$2"
+                shift 2
+                ;;
+            -a|--api)
+                CONFIG[API_BASE]="$2"
+                shift 2
+                ;;
+            -k|--key)
+                CONFIG[API_KEY]="$2"
+                shift 2
+                ;;
+            -d|--device)
+                if [[ "$2" != "cpu" && "$2" != "cuda" ]]; then
+                    log_error "Error: Device must be either 'cpu' or 'cuda'"
+                    exit 1
+                fi
+                CONFIG[DEVICE]="$2"
+                shift 2
+                ;;
+            -t|--type)
+                CONFIG[API_TYPE]="$2"
+                shift 2
+                ;;
+            -w|--waybar)
+                WAYBAR_MODE=true
+                GUI_MODE=true
+                shift
+                ;;
+            -V|--version)
+                show_version
+                exit 0
+                ;;
+            -q|--quiet)
+                VERBOSITY=0
+                shift
+                ;;
+            -v|--verbose)
+                VERBOSITY=2
+                shift
+                ;;
+            -g|--gui)
+                GUI_MODE=true
+                shift
+                ;;
+            *)
+                log_error "Unknown option: $1"
+                show_help
+                exit 1
+                ;;
+        esac
+    done
+}
+
+log_debug() {
+    if [[ $VERBOSITY -ge 2 ]]; then
+        echo "[DEBUG] $1" >&2
+    fi
+    echo "[DEBUG][$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$DEBUG_LOG"
+}
+
+log_info() {
+    if [[ $VERBOSITY -ge 1 ]]; then
+        echo "[INFO] $1" >&2
+    fi
+    echo "[INFO][$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$DEBUG_LOG"
+}
+
+log_error() {
+    echo "[ERROR] $1" >&2
+    echo "[ERROR][$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$DEBUG_LOG"
+}
+
+cleanup() {
+    if [[ -n "$SCREENSHOT_PATH" && -f "$SCREENSHOT_PATH" ]]; then
+        rm -f "$SCREENSHOT_PATH"
+        log_debug "Deleted screenshot: $SCREENSHOT_PATH"
+    fi
+    jobs -p | xargs -r kill
+    log_debug "Cleaned up background processes"
+}
+
 take_screenshot() {
-    mkdir -p "$HOME/Pictures/waybar_output"
-    SCREENSHOT_FILENAME="mangos_screenshot_$(date +%s%N).png"
-    SCREENSHOT_PATH="$HOME/Pictures/$SCREENSHOT_FILENAME"
-    echo "Taking screenshot: $SCREENSHOT_PATH" >> "$DEBUG_LOG"
+    SCREENSHOT_PATH=$(mktemp /tmp/mangos_screenshot_XXXXXX.png)
+    log_debug "Taking screenshot: $SCREENSHOT_PATH"
 
     if grim -g "$(slurp)" "$SCREENSHOT_PATH"; then
-        echo "Screenshot saved: $SCREENSHOT_PATH" >> "$DEBUG_LOG"
+        log_debug "Screenshot saved: $SCREENSHOT_PATH"
         echo "$SCREENSHOT_PATH"
     else
-        echo "Error: Screenshot failed" >> "$DEBUG_LOG"
+        log_error "Screenshot failed"
+        rm -f "$SCREENSHOT_PATH"
         return 1
     fi
 }
 
 preprocess_image() {
+    if [ $# -eq 0 ]; then
+        return 1
+    fi
     source "$VENV_DIR/bin/activate"
-    python - <<EOF
-from PIL import Image, ImageEnhance
-import sys
-image_path = sys.argv[1]
-image = Image.open(image_path)
-image = image.convert('L')
-enhancer = ImageEnhance.Contrast(image)
-image = enhancer.enhance(2)
-image.save(image_path)
-EOF
+    python "$INSTALL_DIR/preprocessing.py" "$1"
     deactivate
 }
 
 perform_ocr() {
-    preprocess_image "$1"
+    local image_path="$1"
+    if ! preprocess_image "$image_path"; then
+        log_error "Image preprocessing failed, skipping OCR"
+        return 1
+    fi
     source "$VENV_DIR/bin/activate"
-    if RESULT=$(python "$INSTALL_DIR/ocr.py" ocr "$1" --device "$DEVICE"); then
+    if RESULT=$(python "$INSTALL_DIR/ocr.py" ocr "$image_path" --device "${CONFIG[DEVICE]}" 2>/dev/null); then
+        RESULT=$(echo "$RESULT" | grep -v "^Image processed successfully:" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+        if [ -z "$RESULT" ]; then
+            log_error "OCR result is empty"
+            return 1
+        fi
         echo "$RESULT"
     else
-        echo "Error: OCR failed" >> "$DEBUG_LOG"
+        log_error "OCR failed"
         return 1
     fi
     deactivate
 }
 
-translate_text() {
-    ESCAPED_TEXT=$(echo "$1" | sed 's/"/\\"/g; s/\n/\\n/g')
-    echo "Attempting to translate: $ESCAPED_TEXT" >> "$DEBUG_LOG"
-    HEADERS=(-H "Content-Type: application/json")
-    if [ -n "$API_KEY" ]; then
-        HEADERS+=(-H "Authorization: Bearer $API_KEY")
-    fi
 
-    if [ "$API_TYPE" = "ollama" ]; then
-        ENDPOINT="$API_BASE/api/generate"
-        DATA='{
-            "model": "'"$MODEL"'",
-            "prompt": "Translate the following Japanese text to English:\n\n\"'"$ESCAPED_TEXT"'\"\n\nInstructions:\n1. Provide only the English translation.\n2. Do not include any explanations or notes.\n3. If the text is incomplete, translate what is available.\n4. Preserve the original meaning as closely as possible Do not write thoughts or anything else but the translation.\n\nTranslation:"
-        }'
-    else
-        ENDPOINT="$API_BASE/chat/completions"
-        DATA='{
-            "model": "'"$MODEL"'",
-            "messages": [
-                {"role": "system", "content": "You are a translator. Translate the given Japanese text to English accurately and concisely."},
-                {"role": "user", "content": "Translate the following Japanese text to English:\n\n\"'"$ESCAPED_TEXT"'\"\n\nInstructions:\n1. Provide only the English translation.\n2. Do not include any explanations or notes.\n3. If the text is incomplete, translate what is available.\n4. Preserve the original meaning as closely as possible."}
-            ]
-        }'
-    fi
-    echo "Headers: ${HEADERS[@]}" >> "$DEBUG_LOG"
-    echo "Endpoint: $ENDPOINT" >> "$DEBUG_LOG"
+translate_text_ollama() {
+    local escaped_text="$1"
+    local endpoint="${CONFIG[API_BASE]}/api/generate"
+    local data=$(jq -n \
+        --arg model "${CONFIG[MODEL]}" \
+        --arg text "$escaped_text" \
+        '{model: $model, prompt: "Translate the following Japanese text to English:\n\n\($text)\n\nInstructions:\n1. Provide only the English translation.\n2. Do not include any explanations or notes.\n3. If the text is incomplete, translate what is available.\n4. Preserve the original meaning as closely as possible Do not write thoughts or anything else but the translation.\n\nTranslation:"}')
 
-    CURL_OUTPUT=$(curl -s -w "\n%{http_code}" "${HEADERS[@]}" -X POST "$ENDPOINT" -d "$DATA")
-
-    HTTP_STATUS=$(echo "$CURL_OUTPUT" | tail -n1)
-    RESPONSE_BODY=$(echo "$CURL_OUTPUT" | sed '$d')
-
-    echo "API HTTP Status: $HTTP_STATUS" >> "$DEBUG_LOG"
-    echo "API Response: $RESPONSE_BODY" >> "$DEBUG_LOG"
-
-    if [ "$HTTP_STATUS" -eq 200 ]; then
-        if [ "$API_TYPE" = "ollama" ]; then
-            TRANSLATION=$(echo "$RESPONSE_BODY" | jq -r '.response' | tr -d '\n')
-        else
-            TRANSLATION=$(echo "$RESPONSE_BODY" | jq -r '.choices[0].message.content' | tr -d '\n')
-        fi
-        if [ -z "$TRANSLATION" ]; then
-            echo "Error: Empty translation received from API" >> "$DEBUG_LOG"
-            return 1
-        fi
-        echo "$TRANSLATION"
-        update_config
-    else
-        echo "Error: API call failed with status $HTTP_STATUS" >> "$DEBUG_LOG"
-        echo "Response body: $RESPONSE_BODY" >> "$DEBUG_LOG"
+    local response
+    response=$(curl -s -H "Content-Type: application/json" -X POST "$endpoint" -d "$data")
+    if [[ -z "$response" ]]; then
+        log_error "Empty response from Ollama API"
         return 1
     fi
+    echo "$response" | jq -r '.response' | tr -d '\n'
+}
+
+translate_text_openai() {
+    local escaped_text="$1"
+    local endpoint="${CONFIG[API_BASE]}/chat/completions"
+    local data=$(jq -n \
+        --arg model "${CONFIG[MODEL]}" \
+        --arg text "$escaped_text" \
+        '{model: $model, messages: [{role: "system", content: "You are a translator. Translate the given Japanese text to English accurately and concisely."}, {role: "user", content: "Translate the following Japanese text to English:\n\n\($text)\n\nInstructions:\n1. Provide only the English translation.\n2. Do not include any explanations or notes.\n3. If the text is incomplete, translate what is available.\n4. Preserve the original meaning as closely as possible."}]}')
+
+    local response
+    response=$(curl -s -H "Content-Type: application/json" -H "Authorization: Bearer ${CONFIG[API_KEY]}" -X POST "$endpoint" -d "$data")
+    if [[ -z "$response" ]]; then
+        log_error "Empty response from OpenAI API"
+        return 1
+    fi
+    echo "$response" | jq -r '.choices[0].message.content' | tr -d '\n'
+}
+
+translate_text() {
+    local escaped_text
+    escaped_text=$(echo "$1" | jq -sR '.')
+    log_debug "Attempting to translate: $escaped_text"
+
+    local translation
+    case "${CONFIG[API_TYPE]}" in
+        ollama)
+            translation=$(translate_text_ollama "$escaped_text")
+            ;;
+        openai)
+            translation=$(translate_text_openai "$escaped_text")
+            ;;
+        *)
+            log_error "Unknown API type ${CONFIG[API_TYPE]}"
+            return 1
+            ;;
+    esac
+
+    if [[ -z "$translation" ]]; then
+        log_error "Empty translation received from API"
+        return 1
+    fi
+    echo "$translation"
+    update_config
 }
 
 waybar_output() {
     local status="$1"
     local message="$2"
-    echo "{\"text\": \"翻訳\", \"tooltip\": \"$message\", \"class\": \"custom-mangaocr-translate $status\"}"
+    jq -n --arg text "翻訳" --arg tooltip "$message" --arg class "custom-mangaocr-translate $status" \
+        '{"text": $text, "tooltip": $tooltip, "class": $class}'
 }
 
+
 perform_translation() {
-    SCREENSHOT=$(take_screenshot)
-    if [ $? -eq 0 ]; then
-        OCR_RESULT=$(perform_ocr "$SCREENSHOT")
-        if [ $? -eq 0 ]; then
-            TRANSLATION=$(translate_text "$OCR_RESULT")
-            if [ $? -eq 0 ]; then
-                OUTPUT="Original: $OCR_RESULT\nTranslation: $TRANSLATION"
-                echo -e "$OUTPUT" | wl-copy
-                echo "$OUTPUT"
-                return 0
-            else
-                echo "Translation failed"
-                return 1
-            fi
-        else
-            echo "OCR failed"
-            return 1
-        fi
+    local screenshot
+    screenshot=$(take_screenshot) || return 1
+
+    log_info "Performing OCR..."
+
+    local ocr_result
+    ocr_result=$(perform_ocr "$screenshot") || return 1
+    rm -f "$screenshot"
+    SCREENSHOT_PATH=""
+
+    if [ -z "$ocr_result" ]; then
+        show_error "OCR result is empty. No text detected in the image."
+        return 1
+    fi
+
+    log_info "Translating..."
+
+    local translation
+    translation=$(translate_text "$ocr_result")
+    local exit_code=$?
+
+    if [[ $exit_code -eq 0 && -n "$translation" ]]; then
+        local result=$(printf "Original:\n%s\n\nTranslation:\n%s" "$ocr_result" "$translation")
+        echo "$result" | wl-copy
+        log_info "Translation completed and copied to clipboard"
+        show_result "$result"
+        echo "$result"
     else
-        echo "Screenshot failed"
+        show_error "Translation failed or returned empty result"
         return 1
     fi
 }
 
+show_result() {
+    local result="$1"
+    if $GUI_MODE; then
+        zenity --info --title="Translation Result" --text="$result" --width=400 --height=200
+    else
+        echo -e "\nTranslation Result:\n$result" >&2
+    fi
+}
+
+show_error() {
+    local error_message="$1"
+    if $GUI_MODE; then
+        zenity --error --title="Translation Failed" --text="$error_message" --width=300
+    else
+        echo "Error: $error_message" >&2
+    fi
+}
+
 main() {
+    read_config
+    parse_arguments "$@"
+    validate_config
+
     if $WAYBAR_MODE; then
         if [ "$1" = "click" ]; then
             echo "Starting translation process" >> "$DEBUG_LOG"
             RESULT=$(perform_translation)
             EXIT_CODE=$?
             if [ $EXIT_CODE -eq 0 ]; then
-                zenity --info --title="Translation Result" --text="$RESULT" --width=400 --height=200
                 waybar_output "" "$RESULT"
             else
                 waybar_output "error" "$RESULT"
@@ -279,17 +361,9 @@ main() {
         fi
     else
         echo "Starting translation process" >> "$DEBUG_LOG"
-        RESULT=$(perform_translation)
-        EXIT_CODE=$?
-        if [ $EXIT_CODE -eq 0 ]; then
-            zenity --info --title="Translation Result" --text="$RESULT" --width=400 --height=200
-            echo -e "$RESULT"
-        else
-            echo "$RESULT" >&2
-        fi
+        perform_translation
     fi
-    cleanup
 }
 
+trap cleanup EXIT
 main "$@"
-exec 2>&3

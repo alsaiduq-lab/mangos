@@ -27,8 +27,8 @@ Thumbs.db
 # Log files
 *.log
 
-# Config files (if you don't want to track changes)
-# config.yaml
+# Config files
+config.yaml
 
 # Compiled Python files
 *.pyc
