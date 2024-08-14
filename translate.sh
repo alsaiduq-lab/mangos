@@ -27,27 +27,28 @@ Usage: mangos [OPTIONS]
 Translate Japanese text from screenshots using OCR and machine translation.
 
 Options:
-  -h, --help                  Show this help message and exit
-  -m, --model MODEL           Specify the translation model to use
-  -a, --api API_BASE          Specify the API base URL
-  -k, --key API_KEY           Specify the API key (optional)
-  -d, --device DEVICE         Specify the device to use (cpu or cuda)
-  -t, --type API_TYPE         Specify the API type (ollama, openai, or other)
-  -V, --version               Show version information
-  -q, --quiet                 Suppress all output except errors
-  -v, --verbose               Show verbose output
+  -h, --help                Show this help message and exit
+  -m, --model MODEL         Specify the translation model to use
+  -a, --api API_BASE        Specify the API base URL
+  -k, --key API_KEY         Specify the API key (required for OpenAI and Anthropic)
+  -d, --device DEVICE       Specify the device to use (cpu or cuda)
+  -t, --type API_TYPE       Specify the API type (ollama, openai, anthropic, or deeplx)
+  -V, --version             Show version information
+  -q, --quiet               Suppress all output except errors
+  -v, --verbose             Show verbose output
 
 Examples:
-  mangos                              Take a screenshot and translate
-  mangos -m gpt-3.5-turbo -t openai   Use OpenAI API for translation
-  mangos -a http://localhost:8080     Use a different API endpoint
-  mangos -k myapikey                  Pass the API key
-  mangos -d cuda                      Use CUDA (GPU) for processing
+  mangos                                         Take a screenshot and translate
+  mangos -m gpt-4o-mini -t openai -k API_KEY     Use OpenAI API for translation
+  mangos -t deeplx                               Use DeepL X for machine translation
+  mangos -m claude-3-haiku-20240307 -t anthropic -k API_KEY  Use Anthropic API
+  mangos -a http://localhost:8080                Use a different API endpoint
+  mangos -d cuda                                 Use CUDA (GPU) for processing
 EOF
 }
 
 show_version() {
-    echo "mangos version 0.0.2"
+    echo "mangos version 0.0.3"
 }
 
 update_config() {
@@ -83,6 +84,16 @@ validate_config() {
     if [[ "${CONFIG[API_TYPE]}" == "openai" && -z "${CONFIG[API_KEY]}" ]]; then
         log_error "API_KEY is required for OpenAI API"
         exit 1
+    fi
+    if [[ "${CONFIG[API_TYPE]}" == "anthropic" ]]; then
+        CONFIG[API_BASE]="https://api.anthropic.com"
+        if [[ -z "${CONFIG[API_KEY]}" ]]; then
+            log_error "API_KEY is required for Anthropic API"
+            exit 1
+        fi
+    fi
+    if [[ "${CONFIG[API_TYPE]}" == "deeplx" ]]; then
+        CONFIG[API_BASE]="http://localhost:1188"
     fi
 }
 
@@ -219,14 +230,30 @@ perform_ocr() {
     deactivate
 }
 
+build_prompt() {
+    local text="$1"
+    cat << EOF
+Translate the following Japanese text to English:
+
+$text
+
+Instructions:
+1. Provide only the English translation.
+2. Do not include any explanations or notes.
+3. If the text is incomplete, translate what is available.
+4. Preserve the original meaning as closely as possible.
+EOF
+}
+
 
 translate_text_ollama() {
     local escaped_text="$1"
     local endpoint="${CONFIG[API_BASE]}/api/generate"
+    local prompt=$(build_prompt "$escaped_text")
     local data=$(jq -n \
         --arg model "${CONFIG[MODEL]}" \
-        --arg text "$escaped_text" \
-        '{model: $model, prompt: "Translate the following Japanese text to English:\n\n\($text)\n\nInstructions:\n1. Provide only the English translation.\n2. Do not include any explanations or notes.\n3. If the text is incomplete, translate what is available.\n4. Preserve the original meaning as closely as possible Do not write thoughts or anything else but the translation.\n\nTranslation:"}')
+        --arg prompt "$prompt" \
+        '{model: $model, prompt: $prompt}')
 
     local response
     response=$(curl -s -H "Content-Type: application/json" -X POST "$endpoint" -d "$data")
@@ -240,10 +267,12 @@ translate_text_ollama() {
 translate_text_openai() {
     local escaped_text="$1"
     local endpoint="${CONFIG[API_BASE]}/chat/completions"
+    local prompt=$(build_prompt "$escaped_text")
     local data=$(jq -n \
         --arg model "${CONFIG[MODEL]}" \
-        --arg text "$escaped_text" \
-        '{model: $model, messages: [{role: "system", content: "You are a translator. Translate the given Japanese text to English accurately and concisely."}, {role: "user", content: "Translate the following Japanese text to English:\n\n\($text)\n\nInstructions:\n1. Provide only the English translation.\n2. Do not include any explanations or notes.\n3. If the text is incomplete, translate what is available.\n4. Preserve the original meaning as closely as possible."}]}')
+        --arg system "You are a translator. Translate the given Japanese text to English accurately and concisely." \
+        --arg prompt "$prompt" \
+        '{model: $model, messages: [{role: "system", content: $system}, {role: "user", content: $prompt}]}')
 
     local response
     response=$(curl -s -H "Content-Type: application/json" -H "Authorization: Bearer ${CONFIG[API_KEY]}" -X POST "$endpoint" -d "$data")
@@ -252,6 +281,70 @@ translate_text_openai() {
         return 1
     fi
     echo "$response" | jq -r '.choices[0].message.content' | tr -d '\n'
+}
+
+translate_text_anthropic() {
+    local escaped_text="$1"
+    local endpoint="${CONFIG[API_BASE]}/v1/messages"
+    local prompt=$(build_prompt "$escaped_text")
+    local data=$(jq -n \
+        --arg model "${CONFIG[MODEL]}" \
+        --arg system "You are a translator. Translate the given Japanese text to English accurately and concisely." \
+        --arg prompt "$prompt" \
+        '{
+            "model": $model,
+            "system": $system,
+            "messages": [
+                {"role": "user", "content": $prompt}
+            ],
+            "max_tokens": 100
+        }')
+
+    log_debug "Sending request to Anthropic API: $data"
+
+    local response
+    response=$(curl -s -H "Content-Type: application/json" -H "x-api-key: ${CONFIG[API_KEY]}" -H "anthropic-version: 2023-06-01" -X POST "$endpoint" -d "$data")
+    local curl_exit_code=$?
+
+    log_debug "Curl exit code: $curl_exit_code"
+    log_debug "Full Anthropic API response: $response"
+
+    if [[ $curl_exit_code -ne 0 ]]; then
+        log_error "Curl request failed with exit code $curl_exit_code"
+        return 1
+    fi
+
+    if [[ -z "$response" ]]; then
+        log_error "Empty response from Anthropic API"
+        return 1
+    fi
+
+    local translation
+    translation=$(echo "$response" | jq -r '.content[0].text // empty')
+
+    if [[ -z "$translation" ]]; then
+        log_error "Failed to extract translation from Anthropic API response"
+        log_error "JSON structure: $response"
+        return 1
+    fi
+
+    echo "$translation" | tr -d '\n'
+}
+
+translate_text_deeplx() {
+    local escaped_text="$1"
+    local endpoint="${CONFIG[API_BASE]}/translate"
+    local data=$(jq -n \
+        --arg text "$escaped_text" \
+        '{text: $text, source_lang: "JA", target_lang: "EN"}')
+
+    local response
+    response=$(curl -s -H "Content-Type: application/json" -X POST "$endpoint" -d "$data")
+    if [[ -z "$response" ]]; then
+        log_error "Empty response from DeepL X API"
+        return 1
+    fi
+    echo "$response" | jq -r '.data' | tr -d '\n'
 }
 
 translate_text() {
@@ -266,6 +359,12 @@ translate_text() {
             ;;
         openai)
             translation=$(translate_text_openai "$escaped_text")
+            ;;
+        anthropic)
+            translation=$(translate_text_anthropic "$escaped_text")
+            ;;
+        deeplx)
+            translation=$(translate_text_deeplx "$escaped_text")
             ;;
         *)
             log_error "Unknown API type ${CONFIG[API_TYPE]}"
@@ -316,7 +415,7 @@ perform_translation() {
         echo "$result" | wl-copy
         log_info "Translation completed and copied to clipboard"
         show_result "$result"
-        echo "$result"
+        return 0
     else
         show_error "Translation failed or returned empty result"
         return 1
