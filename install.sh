@@ -176,7 +176,7 @@ EOL
 
 copy_files() {
     print_message "Copying files to installation directory..."
-    rsync -av --exclude='.git' --exclude='venv' --exclude='install.sh' "$CURRENT_DIR/" "$INSTALL_DIR/"
+    rsync -av --exclude='.git' --exclude='.gitignore' --exclude='venv' --exclude='install.sh' "$CURRENT_DIR/" "$INSTALL_DIR/"
 }
 
 create_update_script() {
@@ -189,8 +189,7 @@ VENV_DIR="\$INSTALL_DIR/venv"
 CURRENT_DIR="$CURRENT_DIR"
 
 echo "Updating mangos..."
-cd "\$INSTALL_DIR"
-git pull origin main
+rsync -av --exclude='.git' --exclude='venv' --exclude='install.sh' --exclude='config.yaml' "$CURRENT_DIR/" "\$INSTALL_DIR/"
 
 echo "Checking for changes in requirements..."
 if ! cmp -s "\$INSTALL_DIR/requirements.txt" "\$VENV_DIR/requirements.txt"; then
