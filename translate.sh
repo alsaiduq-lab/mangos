@@ -200,31 +200,20 @@ take_screenshot() {
     fi
 }
 
-preprocess_image() {
-    if [ $# -eq 0 ]; then
-        return 1
-    fi
-    source "$VENV_DIR/bin/activate"
-    python "$INSTALL_DIR/preprocessing.py" "$1"
-    deactivate
-}
-
 perform_ocr() {
     local image_path="$1"
-    if ! preprocess_image "$image_path"; then
-        log_error "Image preprocessing failed, skipping OCR"
-        return 1
-    fi
     source "$VENV_DIR/bin/activate"
     if RESULT=$(python "$INSTALL_DIR/ocr.py" ocr "$image_path" --device "${CONFIG[DEVICE]}" 2>/dev/null); then
         RESULT=$(echo "$RESULT" | grep -v "^Image processed successfully:" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
         if [ -z "$RESULT" ]; then
             log_error "OCR result is empty"
+            deactivate
             return 1
         fi
         echo "$RESULT"
     else
         log_error "OCR failed"
+        deactivate
         return 1
     fi
     deactivate
@@ -244,7 +233,6 @@ Instructions:
 4. Preserve the original meaning as closely as possible.
 EOF
 }
-
 
 translate_text_ollama() {
     local escaped_text="$1"
@@ -380,13 +368,76 @@ translate_text() {
     update_config
 }
 
+show_result() {
+    local result="$1"
+    if $GUI_MODE; then
+        # Use the virtual environment's Python interpreter
+        # Pass the result via an environment variable
+        RESULT_TO_SHOW="$result" "$VENV_DIR/bin/python3" - <<'EOF'
+import sys
+import os
+
+try:
+    from PyQt6.QtWidgets import QApplication, QMessageBox
+    from PyQt6.QtGui import QFont
+except ImportError:
+    print("PyQt6 is not installed. Please install it with 'pip install PyQt6'")
+    sys.exit(1)
+
+# Read the result from the environment variable
+result = os.environ.get('RESULT_TO_SHOW', '')
+
+if not result:
+    print("No translation result found.")
+    sys.exit(1)
+
+app = QApplication([])
+
+# Create and configure the message box
+msg = QMessageBox()
+msg.setWindowTitle('Translation Result')
+msg.setText(result)
+
+# Set a modern font
+font = QFont('Arial')  # Replace 'Sans Serif' with your preferred font
+font.setPointSize(12)       # Adjust the font size as needed
+msg.setFont(font)
+
+msg.setStyleSheet("""
+    QMessageBox {
+        background-color: #2E3440;
+        color: #D8DEE9;
+    }
+    QMessageBox QLabel {
+        color: #D8DEE9;
+        font-size: 14px;
+    }
+    QMessageBox QPushButton {
+        background-color: #4C566A;
+        color: #D8DEE9;
+        border: 1px solid #5E81AC;
+        padding: 5px;
+        border-radius: 3px;
+    }
+    QMessageBox QPushButton:hover {
+        background-color: #5E81AC;
+    }
+""")
+
+# Display the message box
+msg.exec()
+EOF
+    else
+        echo -e "\nTranslation Result:\n$result" >&2
+    fi
+}
+
 waybar_output() {
     local status="$1"
     local message="$2"
     jq -n --arg text "翻訳" --arg tooltip "$message" --arg class "custom-mangaocr-translate $status" \
         '{"text": $text, "tooltip": $tooltip, "class": $class}'
 }
-
 
 perform_translation() {
     local screenshot
@@ -422,21 +473,31 @@ perform_translation() {
     fi
 }
 
-show_result() {
-    local result="$1"
-    if $GUI_MODE; then
-        zenity --info --title="Translation Result" --text="$result" --width=400 --height=200
-    else
-        echo -e "\nTranslation Result:\n$result" >&2
-    fi
-}
-
 show_error() {
-    local error_message="$1"
+    local title="$1"
+    local message="$2"
     if $GUI_MODE; then
-        zenity --error --title="Translation Failed" --text="$error_message" --width=300
+        echo "$message" | QT_QPA_PLATFORM=xcb "$VENV_DIR/bin/python3" - "$title" <<'EOF'
+import sys
+
+try:
+    from PyQt6.QtWidgets import QApplication, QMessageBox
+except ImportError:
+    print("PyQt6 is not installed. Please install it with "pip install PyQt6"")
+    sys.exit(1)
+
+title = sys.argv[1]
+message = sys.stdin.read()
+
+app = QApplication([])
+msg = QMessageBox()
+msg.setIcon(QMessageBox.Icon.Critical)
+msg.setWindowTitle(title)
+msg.setText(message)
+msg.exec()
+EOF
     else
-        echo "Error: $error_message" >&2
+        echo -e "\n$title:\n$message" >&2
     fi
 }
 
