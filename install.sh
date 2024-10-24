@@ -26,7 +26,7 @@ print_error() {
 check_system_dependencies() {
     print_message "Checking system dependencies..."
     local missing_deps=()
-    for cmd in python3 grim zenity curl jq git rsync; do
+    for cmd in python3 grim curl jq git rsync; do
         if ! command -v $cmd &> /dev/null; then
             missing_deps+=($cmd)
         fi
