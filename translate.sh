@@ -11,7 +11,7 @@ VENV_DIR="$INSTALL_DIR/venv"
 CONFIG_FILE="$INSTALL_DIR/config.yaml"
 
 declare -A CONFIG=(
-    [MODEL]="llama3.1"
+    [MODEL]="llama3.2"
     [API_BASE]="http://localhost:11434"
     [API_KEY]=""
     [DEVICE]="cpu"
@@ -48,7 +48,7 @@ EOF
 }
 
 show_version() {
-    echo "mangos version 0.0.3"
+    echo "mangos version 0.0.4"
 }
 
 update_config() {
@@ -73,13 +73,17 @@ read_config() {
 }
 
 validate_config() {
-    local required_fields=("MODEL" "API_BASE" "DEVICE" "API_TYPE")
+    local required_fields=("MODEL" "DEVICE" "API_TYPE")
     for field in "${required_fields[@]}"; do
         if [[ -z "${CONFIG[$field]}" ]]; then
             log_error "Missing required configuration: $field"
             exit 1
         fi
     done
+
+    if [[ "${CONFIG[API_TYPE]}" == "ollama" && -z "${CONFIG[API_BASE]}" ]]; then
+        CONFIG[API_BASE]="http://localhost:11434"
+    fi
 
     if [[ "${CONFIG[API_TYPE]}" == "openai" && -z "${CONFIG[API_KEY]}" ]]; then
         log_error "API_KEY is required for OpenAI API"
@@ -371,8 +375,6 @@ translate_text() {
 show_result() {
     local result="$1"
     if $GUI_MODE; then
-        # Use the virtual environment's Python interpreter
-        # Pass the result via an environment variable
         RESULT_TO_SHOW="$result" "$VENV_DIR/bin/python3" - <<'EOF'
 import sys
 import os
@@ -435,7 +437,7 @@ EOF
 waybar_output() {
     local status="$1"
     local message="$2"
-    jq -n --arg text "翻訳" --arg tooltip "$message" --arg class "custom-mangaocr-translate $status" \
+    jq -n --arg text "翻訳" --arg tooltip "$message" --arg class "custom-mangos $status" \
         '{"text": $text, "tooltip": $tooltip, "class": $class}'
 }
 
@@ -527,3 +529,4 @@ main() {
 
 trap cleanup EXIT
 main "$@"
+
